@@ -1,0 +1,27 @@
+services:
+  web:
+    image: php:8.3-apache
+    container_name: simples-web
+    ports:
+      - "8081:80"
+    volumes:
+      - ./app:/var/www/html
+    command: >
+      bash -c "docker-php-ext-install pdo_mysql > /dev/null && apache2-foreground"
+    depends_on:
+      - db
+  db:
+    image: mysql:8.0
+    container_name: simples-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: simples
+      MYSQL_USER: simples
+      MYSQL_PASSWORD: simples
+    ports:
+      - "127.0.0.1:3308:3306"
+    volumes:
+      - simples-dados:/var/lib/mysql
+      - ./db:/docker-entrypoint-initdb.d
+volumes:
+  simples-dados:
