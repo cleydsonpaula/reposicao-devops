@@ -197,3 +197,86 @@ não salvo. Como os comandos seguintes rodaram mesmo assim, o commit vazio de te
 ![Proteção aplicada pela API — main](prints/03c-protecao-terminal.png)
 
 ![Envio direto à main recusado](prints/04-push-main-recusado.png)
+
+---
+
+## Etapa 2 — Contêiner da aplicação
+
+### O que foi feito
+
+1. Escrito o `Dockerfile`, a "receita" que empacota a aplicação numa **imagem**.
+2. Criado o `.dockerignore`, para que arquivos que não fazem parte da aplicação não entrem na imagem.
+3. A conexão com o banco (`app/inc/conexao.php`) passou a ler os dados de **variáveis de ambiente**.
+4. O `docker-compose.yml` passou a construir a imagem a partir do `Dockerfile`.
+5. Construída a imagem, executados os contêineres (aplicação + banco) e testado o acesso pelo navegador.
+
+### Dockerfile
+
+```dockerfile
+FROM php:8.3-apache                     # imagem oficial: PHP 8.3 com servidor Apache
+RUN docker-php-ext-install pdo_mysql    # extensão que liga o PHP ao MySQL
+COPY app/ /var/www/html/                # código da aplicação dentro da imagem
+EXPOSE 80                               # a aplicação atende na porta 80
+```
+
+Antes, o contêiner usava a imagem pura do PHP e instalava a extensão do MySQL **toda vez que ligava**.
+Agora a extensão e o código ficam **dentro da imagem**: o contêiner liga pronto e se comporta igual em
+qualquer máquina — no computador, no Jenkins ou no Kubernetes.
+
+O `.dockerignore` exclui da imagem a pasta `.git`, a documentação (`docs`) e os arquivos `.csv`.
+
+### Configuração por variáveis de ambiente
+
+A conexão estava escrita no código (`host=db`, usuário e senha fixos). Para que **a mesma imagem** sirva
+aos quatro ambientes — cada um com seu banco e sua senha —, ela passou a ler as variáveis `DB_HOST`,
+`DB_NAME`, `DB_USER` e `DB_PASS`:
+
+```php
+$host  = getenv('DB_HOST') ?: 'db';
+$banco = getenv('DB_NAME') ?: 'simples';
+$user  = getenv('DB_USER') ?: 'simples';
+$senha = getenv('DB_PASS') ?: 'simples';
+```
+
+Esse princípio — a imagem é a mesma em todos os ambientes, o que muda é a configuração — é um dos fatores
+do *Twelve-Factor App* e é o que permite promover exatamente o mesmo artefato de `dev` até `producao`.
+
+### Comandos
+
+```bash
+docker build -t reposicao-devops:local .   # constrói a imagem a partir do Dockerfile
+docker images reposicao-devops             # confere a imagem criada
+docker compose up -d                       # liga aplicação e banco em segundo plano
+docker compose ps                          # confere se os contêineres estão no ar
+```
+
+| Comando | Para que serve |
+|---|---|
+| `docker build -t nome:etiqueta .` | Lê o `Dockerfile` da pasta atual e gera a imagem com esse nome |
+| `docker images` | Lista as imagens e o tamanho de cada uma |
+| `docker compose up -d` | Cria a rede, o volume do banco e liga os contêineres descritos no `docker-compose.yml` |
+| `docker compose ps` | Mostra os contêineres, o estado (`Up`) e as portas |
+
+### Resultado
+
+- Imagem `reposicao-devops:local` construída em 4 passos, com 176 MB de conteúdo próprio.
+- Contêineres `devops-web` (aplicação, porta 8090) e `devops-db` (MySQL 8.0) no ar.
+- Aplicação acessível em `http://localhost:8090`, com login funcionando (o login consulta o banco, o que
+  confirma a conexão entre os dois contêineres).
+
+### Observações
+
+- A porta 8081, usada originalmente, já estava ocupada por outro sistema na máquina; a aplicação passou a
+  usar a **8090**.
+- O Docker mostrou o aviso `DEPRECATED: The legacy builder is deprecated`. Não é erro: indica que existe
+  uma ferramenta de build mais nova (BuildKit/buildx). A construção funcionou normalmente.
+
+### Evidências
+
+![Construção da imagem](prints/05-docker-build.png)
+
+![Contêineres no ar](prints/06-compose-ps.png)
+
+![Tela de login da aplicação](prints/07a-app-login.png)
+
+![Aplicação após o login](prints/07b-app-logado.png)
