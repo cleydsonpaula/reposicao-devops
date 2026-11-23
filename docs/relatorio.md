@@ -135,8 +135,39 @@ Antes de tornar o repositório público, os arquivos foram conferidos: só há s
 local (usuário `simples`, `root`, `admin`). Os arquivos `.csv` (dados de vendas) estão no `.gitignore` e
 nunca entram no repositório. Na etapa do Kubernetes as senhas passam para *Secrets*.
 
+### Proteção das branches
+
+Para garantir que o fluxo seja respeitado, as branches `homologacao`, `pre-producao` e `main` foram
+protegidas: só recebem código por *pull request*. A `dev` fica livre, pois é onde o desenvolvimento
+acontece. A regra foi aplicada pela API do GitHub:
+
+```bash
+for b in homologacao pre-producao main; do
+gh api -X PUT repos/cleydsonpaula/reposicao-devops/branches/$b/protection --input - <<'EOF'
+{"required_status_checks": null,
+ "enforce_admins": true,
+ "required_pull_request_reviews": {"required_approving_review_count": 0},
+ "restrictions": null}
+EOF
+echo "✓ $b protegida"; done
+```
+
+| Regra | Efeito |
+|---|---|
+| `required_pull_request_reviews` | Código só entra por *pull request* (0 aprovações: trabalho individual — o GitHub não permite aprovar o próprio PR) |
+| `enforce_admins: true` | A regra vale também para o dono do repositório |
+| `allow_force_pushes: false` | Ninguém reescreve o histórico da branch |
+| `allow_deletions: false` | A branch não pode ser apagada |
+
+Na Etapa 4 a regra ganha mais uma exigência: o *pull request* só poderá ser aceito se o pipeline do
+Jenkins tiver passado (*status check*).
+
 ### Evidências
 
 ![Branches no terminal](prints/01-terminal-branches.png)
 
 ![Branches no GitHub](prints/02-branches-github.png)
+
+![Regras de proteção no GitHub](prints/03-protecao-branches.png)
+
+![Envio direto à main recusado](prints/04-push-main-recusado.png)
