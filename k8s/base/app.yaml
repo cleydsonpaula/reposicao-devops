@@ -1,0 +1,54 @@
+# Aplicação (PHP + Apache) de um ambiente.
+# - Deployment: mantém as cópias (réplicas) da aplicação rodando e troca a versão sem tirar do ar.
+# - Service NodePort: publica a aplicação numa porta do nó (cada ambiente tem a sua, ver overlays).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  labels: {app: app}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: app}
+  template:
+    metadata:
+      labels: {app: app}
+    spec:
+      containers:
+        - name: app
+          image: reposicao-devops:local
+          imagePullPolicy: IfNotPresent   # a imagem é carregada no cluster pelo "kind load", não baixada da internet
+          env:
+            - name: DB_HOST
+              value: mysql
+            - name: DB_NAME
+              value: simples
+            - name: DB_USER
+              valueFrom: {secretKeyRef: {name: db, key: user}}
+            - name: DB_PASS
+              valueFrom: {secretKeyRef: {name: db, key: password}}
+          ports:
+            - containerPort: 80
+          readinessProbe:   # só recebe visitas quando a página de login responde
+            httpGet: {path: /login.php, port: 80}
+            periodSeconds: 5
+          livenessProbe:    # se parar de responder, o Kubernetes reinicia o contêiner
+            httpGet: {path: /login.php, port: 80}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+spec:
+  type: NodePort
+  sessionAffinity: ClientIP   # o login fica na sessão de UMA cópia: o mesmo visitante volta sempre à mesma
+  selector: {app: app}
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30081         # trocado em cada ambiente (overlays)

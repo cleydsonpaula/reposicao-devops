@@ -280,3 +280,133 @@ docker compose ps                          # confere se os contêineres estão n
 ![Tela de login da aplicação](prints/07a-app-login.png)
 
 ![Aplicação após o login](prints/07b-app-logado.png)
+
+---
+
+## Etapa 3 — Kubernetes
+
+### O que foi feito
+
+1. Instaladas as ferramentas `kubectl` (v1.37.2) e `kind` (v0.33.0).
+2. Criado um cluster Kubernetes local com o **kind** (*Kubernetes IN Docker*), com portas abertas para o
+   computador — uma por ambiente.
+3. Escritos os manifestos (arquivos YAML) da aplicação e do banco, organizados em **base + overlays**
+   com o Kustomize.
+4. Criado o script `k8s/deploy.sh`, que publica a aplicação num ambiente — o mesmo que o Jenkins usará.
+5. Publicada a aplicação nos quatro ambientes, cada um no seu *namespace*.
+
+### Instalação das ferramentas
+
+```bash
+curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+KIND_VER=$(curl -s https://api.github.com/repos/kubernetes-sigs/kind/releases/latest | grep -m1 tag_name | cut -d'"' -f4)
+curl -Lo kind "https://kind.sigs.k8s.io/dl/${KIND_VER}/kind-linux-amd64"
+sudo install -m 0755 kubectl kind /usr/local/bin/
+```
+
+O `kubectl` é o cliente que envia ordens ao Kubernetes; o `kind` cria um cluster Kubernetes completo dentro
+de um contêiner Docker — leve, ideal para estudo e para testes de pipelines.
+
+### O cluster
+
+O arquivo `k8s/kind-config.yaml` descreve o cluster `devops`: um nó (*control-plane*) e quatro portas
+mapeadas do nó para o computador.
+
+| Ambiente | NodePort (dentro do cluster) | Endereço no navegador |
+|---|---|---|
+| dev | 30081 | http://localhost:8101 |
+| homologacao | 30082 | http://localhost:8102 |
+| pre-producao | 30083 | http://localhost:8103 |
+| producao | 30084 | http://localhost:8104 |
+
+```bash
+kind create cluster --config k8s/kind-config.yaml
+kubectl get nodes
+```
+
+Logo após a criação o nó aparece como `NotReady` (com 4 s de vida, a rede interna ainda está subindo);
+cerca de 40 s depois passa a `Ready`.
+
+### Organização dos manifestos (Kustomize)
+
+```
+k8s/
+├─ kind-config.yaml        configuração do cluster
+├─ base/                   o que é igual nos quatro ambientes
+│   ├─ mysql.yaml          banco: disco, contêiner e Service "mysql"
+│   ├─ app.yaml            aplicação: contêiner(es) e Service NodePort
+│   └─ kustomization.yaml
+├─ overlays/               o que muda em cada ambiente
+│   ├─ dev/            namespace dev,          porta 30081, 1 réplica
+│   ├─ homologacao/    namespace homologacao,  porta 30082, 1 réplica
+│   ├─ pre-producao/   namespace pre-producao, porta 30083, 2 réplicas
+│   └─ producao/       namespace producao,     porta 30084, 2 réplicas
+└─ deploy.sh               publica a aplicação num ambiente
+```
+
+A **base** descreve a aplicação uma única vez; cada **overlay** aplica só as diferenças do seu ambiente.
+Assim não há quatro cópias dos mesmos arquivos para manter. Pré-produção e produção rodam com **duas
+réplicas** da aplicação, como em um ambiente real com alta disponibilidade.
+
+### Recursos do Kubernetes utilizados
+
+| Recurso | Uso neste projeto |
+|---|---|
+| **Namespace** | Separa os quatro ambientes dentro do mesmo cluster |
+| **Deployment** | Mantém os contêineres rodando (recria o que cair) e troca a versão sem tirar do ar |
+| **Service** | Endereço fixo: a aplicação encontra o banco pelo nome `mysql`; o NodePort publica a aplicação |
+| **PersistentVolumeClaim** | Disco do banco — os dados sobrevivem a reinícios do contêiner |
+| **Secret** | Senhas do banco, sorteadas por ambiente e **nunca gravadas no repositório** |
+| **ConfigMap** | Guarda o `db/init.sql`, que cria as tabelas na primeira subida do banco |
+| **Probes** | *readiness*: só envia visitas quando a aplicação responde; *liveness*: reinicia se ela travar |
+
+Duas decisões merecem nota:
+
+- **Banco com estratégia `Recreate`:** ao atualizar, o contêiner antigo do banco é desligado antes de o
+  novo ligar, porque os dois não podem usar o mesmo disco ao mesmo tempo.
+- **`sessionAffinity: ClientIP` no Service da aplicação:** o login é guardado na sessão de uma réplica.
+  Com duas réplicas, o visitante precisa voltar sempre à mesma, senão perderia o login a cada página.
+
+### Script de publicação
+
+`k8s/deploy.sh <ambiente> [etiqueta-da-imagem]` executa, em ordem:
+
+1. cria o *namespace* do ambiente, se ainda não existir;
+2. grava o `init.sql` num ConfigMap;
+3. cria o Secret com senhas aleatórias (só na primeira vez — depois, mantém as existentes);
+4. aplica o overlay do ambiente com a etiqueta da imagem desta versão;
+5. espera o banco e a aplicação ficarem prontos (`kubectl rollout status`).
+
+Todos os passos são **idempotentes**: rodar o script de novo não duplica nada, apenas atualiza.
+
+### Publicação nos quatro ambientes
+
+O cluster não enxerga as imagens do Docker do computador, por isso a imagem é carregada nele antes:
+
+```bash
+kind load docker-image reposicao-devops:local --name devops
+k8s/deploy.sh dev
+k8s/deploy.sh homologacao
+k8s/deploy.sh pre-producao
+k8s/deploy.sh producao
+kubectl get pods -A
+```
+
+Resultado: **10 pods em execução** — em cada ambiente um banco, e 1 (dev, homologação) ou 2 (pré-produção,
+produção) réplicas da aplicação —, todos `1/1 Running` e sem reinícios. Na listagem também aparecem os
+componentes internos do Kubernetes (namespace `kube-system`: etcd, apiserver, scheduler,
+controller-manager).
+
+### Evidências
+
+![Versões do kubectl e do kind](prints/08-kubectl-kind-versao.png)
+
+![Criação do cluster e nó Ready](prints/09-kind-cluster.png)
+
+![Publicação no ambiente dev](prints/10-deploy-dev.png)
+
+![Aplicação no ambiente dev (porta 8101)](prints/11-app-dev-navegador.png)
+
+![Pods dos quatro ambientes](prints/12-pods-todos-ambientes.png)
+
+![Aplicação em produção (porta 8104)](prints/13-app-producao.png)

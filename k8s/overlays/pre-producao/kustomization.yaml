@@ -1,0 +1,15 @@
+# Ambiente pre-producao: a base + o que é só dele (namespace, porta e número de cópias da aplicação).
+namespace: pre-producao
+resources:
+  - ../../base
+patches:
+  - target: {kind: Service, name: app}
+    patch: |-
+      - op: replace
+        path: /spec/ports/0/nodePort
+        value: 30083
+  - target: {kind: Deployment, name: app}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
