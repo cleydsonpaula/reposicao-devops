@@ -162,12 +162,34 @@ echo "✓ $b protegida"; done
 Na Etapa 4 a regra ganha mais uma exigência: o *pull request* só poderá ser aceito se o pipeline do
 Jenkins tiver passado (*status check*).
 
+### Teste da proteção
+
+Para provar que a regra funciona, foi feito um commit vazio direto na `main` e tentado o envio. O GitHub
+recusou:
+
+```
+remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote: - Changes must be made through a pull request.
+ ! [remote rejected] main -> main (protected branch hook declined)
+```
+
+Depois do teste, a `main` local voltou a ficar igual à do GitHub com `git reset --hard origin/main`.
+
+### Problema encontrado
+
+Na primeira tentativa do teste, o `git switch main` foi **abortado** porque havia uma alteração ainda não
+registrada no `docs/relatorio.md` — o Git não troca de branch quando isso poderia sobrescrever trabalho
+não salvo. Como os comandos seguintes rodaram mesmo assim, o commit vazio de teste foi feito na `dev`
+(que não é protegida) e enviado. O commit não altera nenhum arquivo, então foi mantido no histórico.
+
+**Lição:** antes de trocar de branch, conferir com `git status` e registrar (commit) o que estiver pendente.
+
 ### Evidências
 
 ![Branches no terminal](prints/01-terminal-branches.png)
 
 ![Branches no GitHub](prints/02-branches-github.png)
 
-![Regras de proteção no GitHub](prints/03-protecao-branches.png)
+![Proteção aplicada pela API](prints/03-protecao-terminal.png)
 
 ![Envio direto à main recusado](prints/04-push-main-recusado.png)
