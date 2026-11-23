@@ -190,6 +190,10 @@ não salvo. Como os comandos seguintes rodaram mesmo assim, o commit vazio de te
 
 ![Branches no GitHub](prints/02-branches-github.png)
 
-![Proteção aplicada pela API](prints/03-protecao-terminal.png)
+![Proteção aplicada pela API — homologacao](prints/03a-protecao-terminal.png)
+
+![Proteção aplicada pela API — pre-producao](prints/03b-protecao-terminal.png)
+
+![Proteção aplicada pela API — main](prints/03c-protecao-terminal.png)
 
 ![Envio direto à main recusado](prints/04-push-main-recusado.png)
