@@ -1,0 +1,7 @@
+# Pilha de logs (EFK): Elasticsearch guarda, Fluent Bit coleta, Kibana mostra.
+namespace: logs
+resources:
+  - namespace.yaml
+  - elasticsearch.yaml
+  - kibana.yaml
+  - fluent-bit.yaml

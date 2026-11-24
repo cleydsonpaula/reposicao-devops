@@ -1,35 +1,39 @@
-# Reposição Simples
+# Reposição Simples — esteira DevOps
 
-Sistema local para dar baixa nas vendas (CSV do Bling) e repor o endereço principal a partir do excesso.
+Trabalho de Ciência da Computação: esteira de integração e entrega contínuas (CI/CD) para uma aplicação
+web PHP + MySQL, com **quatro ambientes por branch**, **Docker**, **Kubernetes** (kind), **Jenkins**
+(Multibranch Pipeline) e **logs centralizados** (Elasticsearch, Fluent Bit e Kibana).
 
-## Subir
+📄 **Relatório completo, com prints de cada etapa:** [docs/relatorio.md](docs/relatorio.md)
 
-    docker compose up -d
+## Fluxo
 
-Site: http://localhost:8081 — usuário `admin`, senha `admin`.
+```
+dev  →  homologacao  →  pre-producao  →  main (produção, com aprovação manual)
+          (cada promoção por pull request; o Jenkins publica sozinho no ambiente da branch)
+```
 
-## Pastas
+| Branch | Namespace | Endereço local |
+|---|---|---|
+| `dev` | dev | http://localhost:8101 |
+| `homologacao` | homologacao | http://localhost:8102 |
+| `pre-producao` | pre-producao | http://localhost:8103 |
+| `main` | producao | http://localhost:8104 |
 
-- `app/` — as telas (login, produtos, reposição, excesso, histórico)
-- `app/inc/` — conexão, sessão, menu e leitura de CSV
-- `app/css/` — estilo
-- `db/init.sql` — tabelas (roda na primeira subida)
+## Estrutura
 
-## Tabelas
+| Caminho | Conteúdo |
+|---|---|
+| `app/` | A aplicação (PHP): baixa de vendas e reposição do estoque; `saude.php` = verificação de saúde |
+| `db/init.sql` | Tabelas do banco (criadas na primeira subida) |
+| `Dockerfile` | Imagem da aplicação (PHP 8.3 + Apache) |
+| `docker-compose.yml` | A aplicação sozinha, com banco, para desenvolvimento (porta 8090) |
+| `k8s/` | Cluster kind, manifestos Kubernetes (base + overlays por ambiente) e `deploy.sh` |
+| `k8s/logs/` | Pilha de logs: Elasticsearch, Fluent Bit e Kibana |
+| `jenkins/` | Imagem do Jenkins com Docker, kubectl e kind |
+| `Jenkinsfile` | O pipeline: build → testes → carregar no cluster → aprovação (só `main`) → publicar |
+| `docs/` | Relatório e prints |
 
-- `usuarios` — login, senha, ativo
-- `produtos` — SKU e descrição
-- `enderecos` — Principal e Excesso
-- `estoque` — quantidade e capacidade de cada produto em cada endereço (produtos, enderecos)
-- `tipos_movimento` — venda, reposição, entrada no excesso, acerto
-- `importacoes` — cada CSV de vendas subido (usuarios)
-- `pedidos_baixados` — pedido e produto já baixados (importacoes, produtos)
-- `movimentos` — cada mudança de quantidade (produtos, enderecos, tipos_movimento, usuarios)
+Como montar tudo do zero: seção [Como reproduzir](docs/relatorio.md#como-reproduzir) do relatório.
 
-Para recriar o banco do zero: `docker compose down -v && docker compose up -d`.
-
-## Documentação
-
-- `DOCUMENTACAO.md` — como o sistema funciona, tela por tela e tabela por tabela.
-- `GUIA_EQUIPE.md` — o que cada membro fez e como foi feito.
-- `TUTORIAL_GIT.md` — git do zero: criar ramo, commit, pull request, explicado passo a passo.
+Aplicação sozinha: `docker compose up -d --build` → http://localhost:8090 (usuário `admin`, senha `admin`).

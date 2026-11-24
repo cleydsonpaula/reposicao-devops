@@ -1,0 +1,102 @@
+# Fluent Bit: coletor de logs. Roda como DaemonSet (uma cópia em cada nó), lê os arquivos de log de
+# todos os contêineres do nó, acrescenta de qual namespace/pod/contêiner veio cada linha e envia ao
+# Elasticsearch, num índice por dia (logs-AAAA.MM.DD).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluent-bit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluent-bit-leitura
+rules:   # só leitura: precisa consultar pods e namespaces para anotar os logs
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluent-bit-leitura
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-leitura
+subjects:
+  - kind: ServiceAccount
+    name: fluent-bit
+    namespace: logs
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         5
+        Log_Level     info
+
+    # Entrada: os arquivos de log dos contêineres (menos os da própria pilha de logs)
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*.log
+        Exclude_Path      /var/log/containers/*_logs_*.log
+        multiline.parser  docker, cri
+        Tag               kube.*
+        Mem_Buf_Limit     5MB
+        Skip_Long_Lines   On
+
+    # Filtro: acrescenta namespace, pod e contêiner a cada linha
+    [FILTER]
+        Name         kubernetes
+        Match        kube.*
+        Merge_Log    On
+        Keep_Log     Off
+        Labels       Off
+        Annotations  Off
+
+    # Saída: Elasticsearch, um índice por dia
+    [OUTPUT]
+        Name                es
+        Match               kube.*
+        Host                elasticsearch
+        Port                9200
+        Logstash_Format     On
+        Logstash_Prefix     logs
+        Replace_Dots        On
+        Suppress_Type_Name  On
+        Retry_Limit         False
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  labels: {app: fluent-bit}
+spec:
+  selector:
+    matchLabels: {app: fluent-bit}
+  template:
+    metadata:
+      labels: {app: fluent-bit}
+    spec:
+      serviceAccountName: fluent-bit
+      containers:
+        - name: fluent-bit
+          image: cr.fluentbit.io/fluent/fluent-bit:3.1.9
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: config
+              mountPath: /fluent-bit/etc/fluent-bit.conf
+              subPath: fluent-bit.conf
+      volumes:
+        - name: varlog
+          hostPath: {path: /var/log}
+        - name: config
+          configMap: {name: fluent-bit-config}

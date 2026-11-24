@@ -1,0 +1,61 @@
+# Elasticsearch: um nó só (laboratório), sem senha (só acessível de dentro do cluster).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: elasticsearch-dados
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: elasticsearch
+  labels: {app: elasticsearch}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: elasticsearch}
+  template:
+    metadata:
+      labels: {app: elasticsearch}
+    spec:
+      containers:
+        - name: elasticsearch
+          image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+          env:
+            - name: discovery.type          # um nó só: dispensa as verificações de cluster
+              value: single-node
+            - name: xpack.security.enabled  # laboratório: sem senha nem HTTPS
+              value: "false"
+            - name: ES_JAVA_OPTS            # memória da JVM limitada (máquina de estudo)
+              value: "-Xms512m -Xmx512m"
+            - name: node.store.allow_mmap   # dispensa ajuste de kernel (vm.max_map_count) no nó
+              value: "false"
+          ports:
+            - containerPort: 9200
+          readinessProbe:
+            httpGet: {path: /_cluster/health, port: 9200}
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            limits: {memory: 1536Mi}
+          volumeMounts:
+            - name: dados
+              mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: dados
+          persistentVolumeClaim: {claimName: elasticsearch-dados}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+spec:
+  selector: {app: elasticsearch}
+  ports:
+    - port: 9200
