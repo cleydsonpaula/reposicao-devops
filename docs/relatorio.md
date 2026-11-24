@@ -535,6 +535,13 @@ aguardando o clique em "Publicar". Só depois disso a versão foi para produçã
 
 Cada execução levou de 20 a 30 segundos (sem contar a espera pela aprovação).
 
+### Entrega contínua: um push dispara a esteira
+
+Para confirmar o ciclo completo, o próprio commit deste relatório foi enviado à `dev` com `git push`. Sem
+nenhuma ação no Jenkins, a varredura detectou a mudança e rodou a execução **dev #2**, que construiu,
+testou e publicou a nova versão (`reposicao-devops:dev-2`) no ambiente dev. No Stage View, a #2 aparece
+com "1 commit" — o Jenkins registra qual mudança disparou cada execução.
+
 ### Problemas encontrados
 
 - **Fonte "GitHub" × "Git".** No Multibranch, a primeira escolha foi a fonte *GitHub*, que usa a API do
@@ -580,3 +587,141 @@ Cada execução levou de 20 a 30 segundos (sem contar a espera pela aprovação)
 ![Aprovação manual antes da produção](prints/24b-aprovacao-producao.png)
 
 ![Pipeline da main concluído](prints/25-pipeline-main-verde.png)
+
+![Push na dev](prints/26a-push-dev.png)
+
+![Execução dev #2 disparada pelo push](prints/26b-dev-segunda-execucao.png)
+
+---
+
+## Etapa 5 — Logs centralizados: Elasticsearch, Fluent Bit e Kibana
+
+### O que foi feito
+
+1. Criado o namespace `logs` com a pilha **EFK**: Elasticsearch (armazena e indexa), Fluent Bit (coleta) e
+   Kibana (pesquisa e visualização).
+2. Configurado o Fluent Bit para ler os logs de **todos os contêineres** do cluster e anotar em cada linha
+   de qual namespace, pod e contêiner ela veio.
+3. Criado no Kibana o *Data View* `logs-*`.
+4. Gerado tráfego de teste (acessos válidos e acessos a uma página inexistente) e pesquisados os logs —
+   inclusive **só os erros da produção**.
+
+### Arquitetura
+
+```
+Cluster kind
+ ├─ dev / homologacao / pre-producao / producao
+ │     └─ cada contêiner escreve seu log na saída padrão (cada acesso ao Apache vira uma linha)
+ │        o Kubernetes grava essas linhas em /var/log/containers/ no nó
+ └─ namespace logs
+       ├─ Fluent Bit (DaemonSet)  lê /var/log/containers/*.log, acrescenta os metadados do Kubernetes
+       │                          e envia ao Elasticsearch
+       ├─ Elasticsearch           guarda num índice por dia (logs-AAAA.MM.DD)
+       └─ Kibana                  interface web (acesso por kubectl port-forward)
+```
+
+### Manifestos (`k8s/logs/`)
+
+| Arquivo | Conteúdo |
+|---|---|
+| `elasticsearch.yaml` | Deployment de um nó (`discovery.type=single-node`), memória da JVM limitada a 512 MB, disco de 2 GB (PVC) e Service na porta 9200 |
+| `kibana.yaml` | Deployment e Service na porta 5601, apontando para `http://elasticsearch:9200` |
+| `fluent-bit.yaml` | **DaemonSet** (uma cópia por nó, lendo `/var/log` do nó), **ConfigMap** com a configuração e **RBAC** de só leitura (ServiceAccount + ClusterRole + ClusterRoleBinding) para consultar pods e namespaces |
+| `kustomization.yaml` | Agrupa tudo no namespace `logs` |
+
+A configuração do Fluent Bit tem três partes:
+
+```ini
+[INPUT]                          # entrada: os arquivos de log dos contêineres
+    Name              tail
+    Path              /var/log/containers/*.log
+    Exclude_Path      /var/log/containers/*_logs_*.log   # ignora a própria pilha de logs
+    multiline.parser  docker, cri
+    Tag               kube.*
+
+[FILTER]                         # anota namespace, pod e contêiner em cada linha
+    Name   kubernetes
+    Match  kube.*
+
+[OUTPUT]                         # envia ao Elasticsearch, um índice por dia
+    Name             es
+    Host             elasticsearch
+    Logstash_Format  On
+    Logstash_Prefix  logs
+```
+
+O filtro `kubernetes` é o que torna possível separar os ambientes: cada linha ganha o campo
+`kubernetes.namespace_name` (`dev`, `homologacao`, `pre-producao`, `producao`).
+
+### Comandos
+
+```bash
+kubectl apply -k k8s/logs                          # cria a pilha inteira
+kubectl -n logs get pods -w                        # acompanha até os 3 pods ficarem 1/1 Running
+kubectl -n logs port-forward svc/kibana 5601:5601  # túnel até o Kibana: http://localhost:5601
+```
+
+As quatro portas do cluster já estavam reservadas para os ambientes; por isso o Kibana é acessado por um
+túnel do `kubectl` (`port-forward`), sem abrir uma porta nova no cluster.
+
+### Tráfego de teste e pesquisa
+
+```bash
+for i in $(seq 1 20); do
+  curl -s -o /dev/null http://localhost:8104/login.php                    # produção, acesso válido
+  curl -s -o /dev/null http://localhost:8104/pagina-que-nao-existe.php    # produção, erro 404
+  curl -s -o /dev/null http://localhost:8101/login.php                    # dev, acesso válido
+done
+```
+
+No Kibana (Discover), a busca em **KQL** (*Kibana Query Language*)
+
+```
+kubernetes.namespace_name : "producao" and log : "404"
+```
+
+retornou exatamente os **20 acessos com erro da produção**, todos às 21:38, com a linha completa do
+Apache (`GET /pagina-que-nao-existe.php HTTP/1.1" 404`).
+
+A distribuição dos logs por ambiente (1.590 registros em 15 minutos):
+
+| Ambiente | Participação |
+|---|---|
+| producao | 32,1% |
+| pre-producao | 28,2% |
+| dev | 15,4% |
+| homologacao | 14,2% |
+| kube-system | 10,1% |
+
+Produção e pré-produção geram mais registros porque rodam **duas réplicas** — cada réplica registra as
+verificações de saúde (*probes*) do Kubernetes, feitas a cada poucos segundos —, e a produção recebeu
+ainda o tráfego de teste.
+
+### Observações
+
+- **Segurança desligada de propósito.** O Elasticsearch roda sem senha e sem HTTPS
+  (`xpack.security.enabled=false`) e o Kibana avisa "Your data is not secure". Em laboratório isso é
+  aceitável porque o Elasticsearch só é acessível de dentro do cluster; em produção a segurança ficaria
+  ligada, com usuário próprio para o Fluent Bit e o Kibana.
+- **Data do índice em UTC.** O índice criado foi `logs-2026.11.24` às 21h30 de 23/11: o Elasticsearch usa
+  UTC (3 horas à frente do horário de Brasília). O Kibana converte e mostra no horário local.
+- **Mesma imagem em todos os ambientes.** Nos logs, o campo `kubernetes.container_image` dos pods de
+  produção mostra `reposicao-devops:dev-1`, e não `main-1`. Como o código da aplicação foi o mesmo de `dev`
+  até `main` (a pasta `docs/` fica fora da imagem pelo `.dockerignore`), as etiquetas `dev-1`,
+  `homologacao-1`, `pre-producao-1` e `main-1` apontam para **a mesma imagem, com o mesmo conteúdo** — e o
+  cluster exibe a primeira etiqueta que recebeu. É um exemplo de *build* reprodutível: o mesmo código gera
+  a mesma imagem.
+
+### Evidências
+
+![Pods da pilha de logs](prints/27-pods-logs.png)
+
+![Tela inicial do Kibana](prints/28-kibana-inicio.png)
+
+![Criação do Data View logs-*](prints/29-data-view.png)
+
+![Discover: todos os logs](prints/30-discover-todos.png)
+
+![Discover: só os erros da produção](prints/31-discover-erros-producao.png)
+
+![Distribuição dos logs por ambiente](prints/32-logs-por-ambiente.png)
