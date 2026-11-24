@@ -1,0 +1,15 @@
+# Ambiente dev: a base + o que é só dele (namespace, porta e número de cópias da aplicação).
+namespace: dev
+resources:
+  - ../../base
+patches:
+  - target: {kind: Service, name: app}
+    patch: |-
+      - op: replace
+        path: /spec/ports/0/nodePort
+        value: 30081
+  - target: {kind: Deployment, name: app}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1

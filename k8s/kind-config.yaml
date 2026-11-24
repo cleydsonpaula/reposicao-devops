@@ -1,0 +1,17 @@
+# Cluster local do kind: um nó que faz tudo (control-plane) e quatro portas abertas para o computador,
+# uma para cada ambiente. Dentro do cluster cada app usa um NodePort (30081..30084); fora, o navegador
+# acessa pela porta correspondente (8101..8104).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: devops
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30081   # dev
+        hostPort: 8101
+      - containerPort: 30082   # homologacao
+        hostPort: 8102
+      - containerPort: 30083   # pre-producao
+        hostPort: 8103
+      - containerPort: 30084   # producao
+        hostPort: 8104
