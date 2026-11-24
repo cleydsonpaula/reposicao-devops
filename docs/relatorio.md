@@ -159,8 +159,8 @@ echo "✓ $b protegida"; done
 | `allow_force_pushes: false` | Ninguém reescreve o histórico da branch |
 | `allow_deletions: false` | A branch não pode ser apagada |
 
-Na Etapa 4 a regra ganha mais uma exigência: o *pull request* só poderá ser aceito se o pipeline do
-Jenkins tiver passado (*status check*).
+Uma evolução possível é exigir também que o pipeline do Jenkins tenha passado antes de aceitar o
+*pull request* (*required status check*) — ver "Melhorias possíveis" na Etapa 4.
 
 ### Teste da proteção
 
@@ -410,3 +410,173 @@ controller-manager).
 ![Pods dos quatro ambientes](prints/12-pods-todos-ambientes.png)
 
 ![Aplicação em produção (porta 8104)](prints/13-app-producao.png)
+
+---
+
+## Etapa 4 — Jenkins e Multibranch Pipeline
+
+### O que foi feito
+
+1. Escrito o `Jenkinsfile` — o pipeline, **um único arquivo para as quatro branches**.
+2. Criada a página de saúde `app/saude.php` (responde sem depender do banco), usada no teste do pipeline
+   e na *livenessProbe* do Kubernetes.
+3. Construída uma imagem própria do Jenkins com Docker (cliente), `kubectl`, `kind` e os plugins.
+4. Ligado o Jenkins em contêiner, com acesso ao Docker do computador e ao cluster.
+5. Criado o job **Multibranch Pipeline** apontando para o repositório do GitHub.
+6. Promovido o código pelos quatro ambientes por *pull request*, com o Jenkins publicando cada um
+   automaticamente e pedindo **aprovação manual antes da produção**.
+
+### Arquitetura
+
+```
+GitHub ──(varredura a cada 1 min)──► Jenkins (contêiner, porta 8095)
+                                       │  docker build / docker run   ──► Docker do computador (socket)
+                                       │  kind load                   ──► nó do cluster
+                                       └  kubectl (k8s/deploy.sh)     ──► API do Kubernetes (rede "kind")
+```
+
+O Jenkins roda no computador local, que **não é alcançável pela internet**; por isso o GitHub não consegue
+avisá-lo de mudanças (*webhook*). A solução adotada foi a **varredura periódica**: a cada minuto o Jenkins
+consulta o repositório e dispara o pipeline das branches que mudaram.
+
+### O pipeline (`Jenkinsfile`)
+
+| Estágio | O que faz | Em quais branches |
+|---|---|---|
+| Ambiente | Descobre o ambiente pela branch (`main` → `producao`) | todas |
+| Build da imagem | `docker build`, com a etiqueta `<branch>-<número da execução>` | todas |
+| Testes | 1) `php -l` em todos os arquivos PHP, **dentro da imagem gerada**; 2) teste de fumaça: liga o contêiner e espera o `saude.php` responder | todas |
+| Carregar no cluster | `kind load docker-image` | dev, homologacao, pre-producao, main |
+| Aprovação | Para e pergunta "Publicar em PRODUÇÃO?" (limite de 30 min) | **só `main`** |
+| Publicar | `k8s/deploy.sh <ambiente> <etiqueta>` e lista os pods | dev, homologacao, pre-producao, main |
+
+Se qualquer estágio falhar, os seguintes não rodam e **nada é publicado**. Outras branches (por exemplo,
+uma branch de funcionalidade) apenas constroem e testam.
+
+A etiqueta da imagem (`dev-1`, `homologacao-1`, `main-1`…) identifica de qual branch e de qual execução
+veio cada versão — é possível saber exatamente o que está rodando em cada ambiente.
+
+### Imagem e execução do Jenkins
+
+```dockerfile
+FROM jenkins/jenkins:lts-jdk21
+USER root
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+RUN curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/v1.37.2/bin/linux/amd64/kubectl \
+ && curl -fsSLo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64 \
+ && chmod +x /usr/local/bin/kubectl /usr/local/bin/kind
+USER jenkins
+RUN jenkins-plugin-cli --plugins workflow-aggregator workflow-multibranch git pipeline-stage-view \
+    timestamper ws-cleanup credentials-binding
+```
+
+```bash
+kind get kubeconfig --internal --name devops > ~/.kube/kind-devops-interno   # acesso ao cluster
+docker build -t reposicao-jenkins jenkins/
+docker run -d --name jenkins --network kind -p 8095:8080 \
+  -v jenkins_home:/var/jenkins_home \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v $HOME/.kube/kind-devops-interno:/kube/config:ro \
+  --group-add $(stat -c %g /var/run/docker.sock) \
+  --restart unless-stopped reposicao-jenkins
+```
+
+| Opção | Por quê |
+|---|---|
+| `--network kind` | O Jenkins fica na mesma rede do cluster e alcança a API em `devops-control-plane:6443` |
+| `-v /var/run/docker.sock` | O Jenkins usa o Docker do computador para construir e testar as imagens |
+| `kubeconfig --internal` | Gera o acesso ao cluster com o nome do nó (e não `127.0.0.1`), que funciona de dentro de outro contêiner; o arquivo tem a chave do cluster e fica fora do repositório |
+| `--group-add` | Dá ao usuário do Jenkins permissão de usar o Docker, sem rodar o Jenkins como root |
+| `-v jenkins_home` | Configuração e histórico sobrevivem à recriação do contêiner |
+
+### Configuração do Multibranch Pipeline
+
+- **Branch Sources → Git**, repositório `https://github.com/cleydsonpaula/reposicao-devops.git`, sem
+  credencial (repositório público), comportamento *Discover branches*.
+- **Build Configuration:** *by Jenkinsfile*.
+- **Scan Multibranch Pipeline Triggers:** *Periodically if not otherwise run*, a cada **1 minuto**.
+
+Na primeira varredura, só a `dev` tinha `Jenkinsfile`; o Jenkins criou o pipeline apenas para ela:
+
+```
+Checking branch main          ‘Jenkinsfile’ not found   Does not meet criteria
+Checking branch homologacao   ‘Jenkinsfile’ not found   Does not meet criteria
+Checking branch pre-producao  ‘Jenkinsfile’ not found   Does not meet criteria
+Checking branch dev           ‘Jenkinsfile’ found       Met criteria
+Scheduled build for branch: dev
+```
+
+### Promoção pelos ambientes
+
+A cada *pull request* aceito, a branch de destino passa a ter o `Jenkinsfile`, e em até um minuto o
+Jenkins cria o pipeline dela e publica no ambiente correspondente — **sem nenhuma ação no Jenkins**.
+
+```bash
+gh pr create --base homologacao  --head dev          --title "Promoção: dev → homologação"            # PR #1
+gh pr merge 1 --merge
+gh pr create --base pre-producao --head homologacao  --title "Promoção: homologação → pré-produção"   # PR #2
+gh pr merge 2 --merge
+gh pr create --base main         --head pre-producao --title "Promoção: pré-produção → produção"      # PR #3
+gh pr merge 3 --merge
+```
+
+Na `main`, o pipeline construiu, testou e carregou a imagem, e então **parou no estágio Aprovação**,
+aguardando o clique em "Publicar". Só depois disso a versão foi para produção (o Jenkins registra
+"paused for 1min 35s").
+
+### Resultado
+
+| Ambiente | Versão em execução | Réplicas | Publicada por |
+|---|---|---|---|
+| dev | `reposicao-devops:dev-1` | 1/1 | Jenkins, automático |
+| homologacao | `reposicao-devops:homologacao-1` | 1/1 | Jenkins, após PR #1 |
+| pre-producao | `reposicao-devops:pre-producao-1` | 2/2 | Jenkins, após PR #2 |
+| producao | `reposicao-devops:main-1` | 2/2 | Jenkins, após PR #3 **e aprovação manual** |
+
+Cada execução levou de 20 a 30 segundos (sem contar a espera pela aprovação).
+
+### Problemas encontrados
+
+- **Fonte "GitHub" × "Git".** No Multibranch, a primeira escolha foi a fonte *GitHub*, que usa a API do
+  GitHub. Sem credencial, a API limita a 60 consultas por hora — com varredura a cada minuto o Jenkins
+  ficaria bloqueado. Além disso, a opção padrão *"Exclude branches that are also filed as PRs"* esconde a
+  branch enquanto houver um PR aberto. A fonte foi trocada por *Git*, que lê o repositório como um
+  `git clone`, sem limite e sem credencial.
+- **`gh pr merge` sem número.** Sem o número, o comando age sobre o PR da branch atual (`dev`), que já tinha
+  sido aceito, e ofereceu apagar a branch local. A resposta foi "não", e o PR foi aceito pelo número
+  (`gh pr merge 2 --merge`). **Lição:** sempre informar o número do PR.
+
+### Melhorias possíveis
+
+- **Webhook** em vez de varredura, com o Jenkins publicado na internet (ou por um túnel).
+- **Status do pipeline no GitHub** e regra de proteção exigindo o pipeline verde antes do merge — exige a
+  fonte *GitHub* com um token de acesso.
+- **Registro de imagens** (Docker Hub, GHCR) em vez de `kind load`, como seria num cluster de verdade.
+
+### Evidências
+
+![Imagem do Jenkins construída e contêiner no ar](prints/14-jenkins-build-run.png)
+
+![Assistente de configuração — extensões sugeridas](prints/15-jenkins-plugins-sugeridos.png)
+
+![Instalação das extensões](prints/16-jenkins-plugins.png)
+
+![Painel inicial do Jenkins](prints/17-jenkins-painel.png)
+
+![Configuração do Multibranch Pipeline (fonte Git)](prints/18-multibranch-config.png)
+
+![Log da primeira varredura](prints/19-scan-log.png)
+
+![Pipeline da dev — Stage View](prints/20-pipeline-dev-verde.png)
+
+![Pull request dev → homologação](prints/21-pull-request.png)
+
+![Jenkins com dev e homologacao](prints/22-jenkins-2-branches.png)
+
+![Jenkins com três branches](prints/23-jenkins-3-branches.png)
+
+![main aguardando aprovação](prints/24a-main-aguardando.png)
+
+![Aprovação manual antes da produção](prints/24b-aprovacao-producao.png)
+
+![Pipeline da main concluído](prints/25-pipeline-main-verde.png)
