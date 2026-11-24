@@ -32,8 +32,8 @@ spec:
           readinessProbe:   # só recebe visitas quando a página de login responde
             httpGet: {path: /login.php, port: 80}
             periodSeconds: 5
-          livenessProbe:    # se parar de responder, o Kubernetes reinicia o contêiner
-            httpGet: {path: /login.php, port: 80}
+          livenessProbe:    # se parar de responder, o Kubernetes reinicia o contêiner (não depende do banco)
+            httpGet: {path: /saude.php, port: 80}
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
