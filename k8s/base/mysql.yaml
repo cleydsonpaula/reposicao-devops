@@ -1,0 +1,70 @@
+# Banco de dados MySQL de um ambiente.
+# - PersistentVolumeClaim: o "disco" do banco — os dados sobrevivem se o contêiner reiniciar.
+# - Deployment: mantém 1 contêiner do MySQL rodando; as senhas vêm do Secret "db".
+# - Service: dá ao banco o nome "mysql" dentro do namespace (é esse o DB_HOST da aplicação).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mysql-dados
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+  labels: {app: mysql}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # banco: desliga o antigo antes de ligar o novo (os dois não podem usar o mesmo disco)
+  selector:
+    matchLabels: {app: mysql}
+  template:
+    metadata:
+      labels: {app: mysql}
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          env:
+            - name: MYSQL_DATABASE
+              value: simples
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: db, key: root-password}}
+            - name: MYSQL_USER
+              valueFrom: {secretKeyRef: {name: db, key: user}}
+            - name: MYSQL_PASSWORD
+              valueFrom: {secretKeyRef: {name: db, key: password}}
+          ports:
+            - containerPort: 3306
+          readinessProbe:   # só recebe conexões quando o MySQL responde
+            exec:
+              command: ["sh", "-c", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$MYSQL_ROOT_PASSWORD\""]
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          volumeMounts:
+            - name: dados
+              mountPath: /var/lib/mysql
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d   # cria as tabelas na primeira subida
+      volumes:
+        - name: dados
+          persistentVolumeClaim: {claimName: mysql-dados}
+        - name: init
+          configMap: {name: db-init}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  selector: {app: mysql}
+  ports:
+    - port: 3306
