@@ -1,7 +1,33 @@
 # Relatório — Esteira de entrega contínua do sistema Reposição Simples
 
-**Aluno:** Cleydson Paula
+**Aluno:** Cleydson Santos
 **Repositório:** https://github.com/cleydsonpaula/reposicao-devops
+
+## Resumo
+
+Este trabalho monta, do zero e inteiramente em ambiente local, uma esteira de integração e entrega
+contínuas (CI/CD) para uma aplicação web em PHP + MySQL. O código vive no GitHub em quatro branches —
+`dev`, `homologacao`, `pre-producao` e `main` —, promovidas sempre por *pull request*. Um **Jenkins**
+com **Multibranch Pipeline** detecta cada mudança, constrói a imagem **Docker**, testa e publica no
+ambiente correspondente de um cluster **Kubernetes** (kind), com **aprovação manual antes da produção**.
+Os logs de todos os contêineres são coletados pelo **Fluent Bit**, guardados no **Elasticsearch** e
+pesquisados no **Kibana**. Ao final, os quatro ambientes rodam versões publicadas pela esteira, e um
+simples `git push` dispara todo o ciclo.
+
+## Sumário
+
+1. [Objetivo](#objetivo)
+2. [Visão geral da arquitetura](#visão-geral-da-arquitetura)
+3. [Fundamentos](#fundamentos)
+4. [A aplicação](#a-aplicação)
+5. [Etapa 1 — Repositório e estratégia de branches](#etapa-1--repositório-e-estratégia-de-branches)
+6. [Etapa 2 — Contêiner da aplicação](#etapa-2--contêiner-da-aplicação)
+7. [Etapa 3 — Kubernetes](#etapa-3--kubernetes)
+8. [Etapa 4 — Jenkins e Multibranch Pipeline](#etapa-4--jenkins-e-multibranch-pipeline)
+9. [Etapa 5 — Logs centralizados: Elasticsearch, Fluent Bit e Kibana](#etapa-5--logs-centralizados-elasticsearch-fluent-bit-e-kibana)
+10. [Etapa 6 — Promoção final](#etapa-6--promoção-final)
+11. [Como reproduzir](#como-reproduzir)
+12. [Conclusão](#conclusão)
 
 ## Objetivo
 
@@ -725,3 +751,104 @@ ainda o tráfego de teste.
 ![Discover: só os erros da produção](prints/31-discover-erros-producao.png)
 
 ![Distribuição dos logs por ambiente](prints/32-logs-por-ambiente.png)
+
+---
+
+## Etapa 6 — Promoção final
+
+Com todas as etapas prontas na `dev`, a versão completa — aplicação, manifestos, pipeline, pilha de logs e
+este relatório — foi promovida novamente pelos quatro ambientes, desta vez com mudanças reais em cada
+*pull request*: `dev` → `homologacao` → `pre-producao` → `main`, com a aprovação manual no Jenkins antes
+da produção. Assim a branch `main`, a primeira que se vê no GitHub, passa a conter o trabalho completo.
+
+*(evidências ao final desta seção)*
+
+---
+
+## Como reproduzir
+
+Pré-requisitos: Linux com Docker, `git` e `gh` (GitHub CLI) autenticado; cerca de 6 GB de memória livre.
+
+```bash
+# 1. código
+git clone https://github.com/cleydsonpaula/reposicao-devops.git && cd reposicao-devops
+
+# 2. (opcional) a aplicação sozinha, com Docker Compose — http://localhost:8090 (admin / admin)
+docker compose up -d --build
+
+# 3. ferramentas do Kubernetes
+curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+curl -Lo kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+sudo install -m 0755 kubectl kind /usr/local/bin/ && rm kubectl kind
+
+# 4. cluster e os quatro ambientes (portas 8101 a 8104)
+kind create cluster --config k8s/kind-config.yaml
+docker build -t reposicao-devops:local .
+kind load docker-image reposicao-devops:local --name devops
+for amb in dev homologacao pre-producao producao; do k8s/deploy.sh $amb; done
+
+# 5. pilha de logs — Kibana em http://localhost:5601
+kubectl apply -k k8s/logs
+kubectl -n logs port-forward svc/kibana 5601:5601
+
+# 6. Jenkins — http://localhost:8095
+kind get kubeconfig --internal --name devops > ~/.kube/kind-devops-interno
+docker build -t reposicao-jenkins jenkins/
+docker run -d --name jenkins --network kind -p 8095:8080 \
+  -v jenkins_home:/var/jenkins_home \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v $HOME/.kube/kind-devops-interno:/kube/config:ro \
+  --group-add $(stat -c %g /var/run/docker.sock) \
+  --restart unless-stopped reposicao-jenkins
+docker exec jenkins cat /var/jenkins_home/secrets/initialAdminPassword   # senha inicial
+```
+
+No Jenkins: instalar as extensões sugeridas, criar o usuário administrador e um **Multibranch Pipeline**
+com fonte **Git** apontando para o repositório, *Script Path* `Jenkinsfile` e varredura periódica de
+1 minuto. A partir daí, cada `git push` numa das quatro branches publica no ambiente correspondente.
+
+| Serviço | Endereço |
+|---|---|
+| dev / homologação / pré-produção / produção | http://localhost:8101 · 8102 · 8103 · 8104 |
+| Jenkins | http://localhost:8095 |
+| Kibana | http://localhost:5601 (com o `port-forward` aberto) |
+
+Para desligar tudo e liberar a memória: `docker stop jenkins devops-control-plane`
+(religar: `docker start devops-control-plane jenkins`).
+
+---
+
+## Conclusão
+
+O trabalho resultou numa esteira completa e funcional: uma alteração enviada ao GitHub é construída,
+testada e publicada automaticamente, ambiente por ambiente, e só chega à produção depois de passar pelos
+outros três e de uma aprovação explícita. O mesmo artefato — a imagem Docker — é promovido de `dev` até
+`producao`; o que muda entre os ambientes é apenas a configuração (namespace, porta, número de réplicas,
+senhas), o que dá confiança de que o que foi testado é exatamente o que vai ao ar. Com os logs
+centralizados, um problema em produção pode ser localizado em segundos, filtrando por ambiente e por
+tipo de erro.
+
+**Principais aprendizados:**
+
+- **Git como fonte da verdade:** branches protegidas e *pull requests* garantem a ordem de promoção — nem
+  o dono do repositório consegue enviar direto à `main`.
+- **Contêineres e configuração por ambiente:** a mesma imagem serve aos quatro ambientes porque a
+  aplicação lê a configuração de variáveis de ambiente, e as senhas ficam em *Secrets*, fora do código.
+- **Kubernetes declarativo:** com Kustomize, a descrição comum fica na base e cada ambiente declara só o
+  que muda; o cluster mantém o estado desejado (réplicas, reinício de contêineres, atualização sem parada).
+- **Pipeline como código:** o `Jenkinsfile` versionado junto com a aplicação descreve a esteira inteira; o
+  Multibranch cria um pipeline para cada branch e decide o comportamento pela branch.
+- **Observabilidade:** sem a anotação de metadados do Kubernetes feita pelo Fluent Bit, os logs dos quatro
+  ambientes seriam indistinguíveis.
+
+**Dificuldades encontradas** (detalhadas em cada etapa): troca de branch bloqueada por alteração não
+registrada; escolha da fonte do Multibranch (GitHub × Git) por causa do limite da API sem credencial;
+`gh pr merge` sem o número do PR; página de login dependente do banco, que exigiu uma página de saúde para
+o teste automático; e a necessidade de rodar Jenkins e Kibana dentro de um ambiente local sem portas
+extras, resolvida com a rede do kind e o `port-forward`.
+
+**Próximos passos** para um ambiente real: Jenkins acessível pela internet com *webhook* do GitHub;
+status do pipeline exigido no *pull request*; registro de imagens (Docker Hub/GHCR) no lugar do
+`kind load`; segurança do Elasticsearch ligada; e painéis e alertas no Kibana (por exemplo, aviso quando
+os erros 5xx da produção passarem de um limite).
+
