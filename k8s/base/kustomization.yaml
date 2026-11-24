@@ -1,0 +1,4 @@
+# Base: o que é igual nos quatro ambientes.
+resources:
+  - mysql.yaml
+  - app.yaml
