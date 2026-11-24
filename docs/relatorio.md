@@ -761,7 +761,34 @@ este relatório — foi promovida novamente pelos quatro ambientes, desta vez co
 *pull request*: `dev` → `homologacao` → `pre-producao` → `main`, com a aprovação manual no Jenkins antes
 da produção. Assim a branch `main`, a primeira que se vê no GitHub, passa a conter o trabalho completo.
 
-*(evidências ao final desta seção)*
+```bash
+gh pr create --base homologacao  --head dev          --title "Versão final: dev → homologação"            # PR #4
+gh pr merge 4 --merge
+gh pr create --base pre-producao --head homologacao  --title "Versão final: homologação → pré-produção"   # PR #5
+gh pr merge 5 --merge
+gh pr create --base main         --head pre-producao --title "Versão final: pré-produção → produção"      # PR #6
+gh pr merge 6 --merge
+```
+
+Os três *pull requests* foram aceitos em sequência, sem esperar o Jenkins entre um e outro. Cada branch
+tem o seu pipeline, e o Jenkins processou todas; ainda assim, a produção **não foi publicada
+automaticamente**: a execução `main #2` parou na aprovação ("Publicar main-2 em PRODUÇÃO?") até o clique
+em "Publicar". No Stage View da `main`, a execução #2 registra "3 commits" — as mudanças desta versão.
+
+| Branch | Execução | Resultado |
+|---|---|---|
+| dev | #4 | publicada automaticamente (cada `git push` gera uma execução) |
+| homologacao | #2 | publicada após o PR #4 |
+| pre-producao | #2 | publicada após o PR #5 |
+| main | #2 | publicada após o PR #6 **e a aprovação manual** |
+
+### Evidências
+
+![Os seis pull requests do trabalho](prints/33-prs-github.png)
+
+![Estado final das quatro branches no Jenkins](prints/34-jenkins-final.png)
+
+![main: duas execuções, ambas aprovadas manualmente](prints/35-main-segunda-aprovacao.png)
 
 ---
 
